@@ -13,6 +13,8 @@ pub trait Keyboard
 {
     fn tap(&self, key_code: u16) -> impl Future<Output = Result<()>>;
     fn tap_with_delay(&self, key_code: u16, delay: Duration) -> impl Future<Output = Result<()>>;
+    fn press(&self, key_code: u16) -> impl Future<Output = Result<()>>;
+    fn release(&self, key_code: u16) -> impl Future<Output = Result<()>>;
 }
 
 type Result<T> = core::result::Result<T, Error>;

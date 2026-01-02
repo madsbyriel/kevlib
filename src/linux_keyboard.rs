@@ -244,6 +244,24 @@ impl Keyboard for VirtualKeyboard {
 
         Ok(())
     }
+
+    async fn press(&self, key_code: u16) -> Result<()>
+    {
+        let mut inner = self.device.lock().await;
+
+        inner.emit(&[InputEvent::new(EventType::KEY.0, key_code, 1)])?;
+
+        Ok(())
+    }
+
+    async fn release(&self, key_code: u16) -> Result<()>
+    {
+        let mut inner = self.device.lock().await;
+
+        inner.emit(&[InputEvent::new(EventType::KEY.0, key_code, 0)])?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
