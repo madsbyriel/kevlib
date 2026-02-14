@@ -1,12 +1,12 @@
 [package]
-name = "klib"
+name = "kevlib"
 version = "0.1.0"
 edition = "2024"
 authors = ["Mads Hvid Byriel <madshbyriel@gmail.com>"]
 description = "Klib"
 license = "MIT"
-repository = "https://github.com/madsbyriel/Klib"
-homepage = "https://github.com/madsbyriel/Klib"
+repository = "https://github.com/madsbyriel/kevlib"
+homepage = "https://github.com/madsbyriel/kevlib"
 categories = []
 readme = "README.md"
 
