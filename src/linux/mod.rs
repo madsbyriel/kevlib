@@ -1,165 +1,79 @@
-use crate::{Result, RuntimeInner, linux::listening_device::ListeningDevice};
-use evdev::{Device, InputEvent};
-use futures::FutureExt;
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::sync::Arc;
+
+use evdev::InputEvent;
 use tokio::sync::{Mutex, mpsc, oneshot};
-use tracing::{error, info};
+use tracing::error;
 
-mod listening_device;
+use crate::{Result, Runtime};
 
-pub struct LinuxRuntime {
-    stop_chans: Vec<oneshot::Sender<u8>>,
+mod device_scanner;
+mod input_scanner;
 
-    multiplex_sx: Arc<Mutex<Vec<mpsc::Sender<InputEvent>>>>,
+pub fn get_runtime() -> Result<impl Runtime> {
+    Ok(LinuxRuntime::initialize())
 }
 
-impl RuntimeInner for LinuxRuntime {
-    async fn get_receiver(&mut self) -> mpsc::Receiver<InputEvent> {
-        let (sx, rx) = mpsc::channel(100);
+struct LinuxRuntime {
+    input_sxs: Arc<Mutex<Vec<mpsc::Sender<InputEvent>>>>,
+    kill_sxs: Vec<oneshot::Sender<u8>>,
+}
 
-        let mut v = self.multiplex_sx.lock().await;
-        v.push(sx);
-
-        rx
+impl Drop for LinuxRuntime {
+    fn drop(&mut self) {
+        for c in self.kill_sxs.drain(..) {
+            match c.send(0) {
+                Ok(_) => {},
+                Err(_) => {},
+            };
+        }
     }
 }
 
 impl LinuxRuntime {
     fn initialize() -> Self {
-        let stop_chans = vec![];
-        let multiplex_sx = vec![];
+        let input_sxs = Arc::new(Mutex::new(vec![]));
+        let (device_kill_sx, device_kill_rx) = oneshot::channel();
+        let kill_sxs = vec![device_kill_sx];
 
-        let mut runtime = LinuxRuntime {
-            stop_chans,
-            multiplex_sx: Arc::new(Mutex::new(multiplex_sx)),
-        };
+        let (sx_devices, rx_devices) = mpsc::channel(100);
+        device_scanner::start_device_scanner(sx_devices, device_kill_rx);
 
-        runtime.spawn_device_listening_thread();
+        let (sx_input, rx_input) = mpsc::channel(100);
+        input_scanner::start_input_scanner(rx_devices, sx_input);
 
-        runtime
+        start_input_sender(rx_input, input_sxs.clone());
+
+        LinuxRuntime { input_sxs, kill_sxs }
     }
 
-    fn get_stop_recv(&mut self) -> oneshot::Receiver<u8> {
-        let (sx, rx) = oneshot::channel();
-        self.stop_chans.push(sx);
+    async fn get_input_rx(&mut self) -> mpsc::Receiver<InputEvent> {
+        let mut sxs = self.input_sxs.lock().await;
+        let (sx, rx) = mpsc::channel(100);
+        sxs.push(sx);
         rx
     }
+}
 
-    fn send_stop_signals(&mut self) -> () {
-        for sx in self.stop_chans.drain(..) {
-            match sx.send(0) {
-                Ok(_) => {}
-                Err(_) => {
-                    error!("error sending stop signal");
-                }
-            };
-        }
-    }
+fn start_input_sender(mut rx: mpsc::Receiver<InputEvent>, sxs: Arc<Mutex<Vec<mpsc::Sender<InputEvent>>>>) -> () {
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let senders = sxs.lock().await;
 
-    fn spawn_device_listening_thread(&mut self) -> () {
-        let kill_device_rx = self.get_stop_recv();
-        let (sx_devices, mut rx_devices) = mpsc::channel(100);
-
-        tokio::spawn(async move {
-            let mut stop = kill_device_rx.fuse();
-
-            loop {
-                futures::select! {
-                    _ = stop => {
-                        info!("stopping device scanner");
-                        break;
-                    },
-                    _ = get_and_send_devices(&sx_devices).fuse() => {},
-                }
-            }
-        });
-
-        let (sx_inputs, mut rx_inputs) = mpsc::channel(100);
-        tokio::spawn(async move {
-            let devices = Arc::new(Mutex::new(vec![]));
-
-            while let Some((p, d)) = rx_devices.recv().await {
-                let path = match p.to_str() {
-                    Some(v) => v.to_string(),
-                    None => "unknown path".to_string(),
-                };
-                let devname = match d.name() {
-                    Some(v) => v.to_string(),
-                    None => "unknown device".to_string(),
-                };
-
-                if add_device(d, sx_inputs.clone(), devices.clone()).await {
-                    info!("got new device {devname} at {path}");
-                }
-            }
-        });
-
-        let senders = self.multiplex_sx.clone();
-        tokio::spawn(async move {
-            while let Some(input) = rx_inputs.recv().await {
-                info!("got an event");
-                let senders = senders.lock().await;
-                for s in senders.iter() {
-                    match s.send(input).await {
-                        Ok(_) => {},
-                        Err(e) => {
-                            error!("error sending input to listener: {e}")
-                        },
+            for s in senders.iter() {
+                match s.send(event).await {
+                    Ok(_) => {},
+                    Err(e) => {
+                        error!("error sending event, shutting down input sender: {e}");
+                        return;
                     }
                 }
             }
-        });
-    }
+        }
+    });
 }
 
-impl Drop for LinuxRuntime {
-    fn drop(&mut self) {
-        self.send_stop_signals();
-
-        info!("runtime dropped");
+impl Runtime for LinuxRuntime {
+    async fn get_input_rx(&mut self) -> mpsc::Receiver<InputEvent> {
+        LinuxRuntime::get_input_rx(self).await
     }
-}
-
-fn get_devices() -> Vec<(PathBuf, Device)> {
-    let mut devices = vec![];
-    for (p, d) in evdev::enumerate() {
-        devices.push((p, d));
-    }
-
-    devices
-}
-
-pub fn start_listener() -> Result<LinuxRuntime> {
-    Ok(LinuxRuntime::initialize())
-}
-
-async fn add_device(
-    device: Device,
-    sender: mpsc::Sender<InputEvent>,
-    devices: Arc<Mutex<Vec<ListeningDevice>>>,
-) -> bool {
-    let mut devices = devices.lock().await;
-
-    let not_found = devices.iter().all(|d| d.input_id() != device.input_id());
-
-    if not_found {
-        let device = ListeningDevice::new(device, sender);
-        devices.push(device);
-        return true;
-    }
-
-    false
-}
-
-async fn get_and_send_devices(sender: &mpsc::Sender<(PathBuf, Device)>) -> () {
-    let devices = get_devices();
-    for d in devices {
-        match sender.send(d).await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("error sending discovered device: {e}");
-            }
-        };
-    }
-    tokio::time::sleep(Duration::from_secs(5)).await;
 }
