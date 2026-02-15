@@ -1,5 +1,6 @@
 use evdev::InputEvent;
 use tokio::sync::mpsc;
+use tracing::info;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -16,4 +17,16 @@ pub fn get_runtime() -> Result<impl Runtime> {
 
 pub trait Runtime {
     fn get_input_rx(&mut self) -> impl Future<Output = mpsc::Receiver<InputEvent>>;
+}
+
+
+pub async fn test() {
+    for (_, d) in evdev::enumerate() {
+        tokio::spawn(async move {
+            let mut stream = d.into_event_stream().unwrap();
+            while let Ok(event) = stream.next_event().await {
+                info!("EVENT: {event:?}");
+            }
+        });
+    }
 }

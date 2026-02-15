@@ -1,12 +1,11 @@
 use std::{path::PathBuf, time::Duration};
 
-use evdev::{Device, KeyCode};
 use futures::FutureExt;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{error, info};
+use tracing::{error};
 
 pub fn start_device_scanner(
-    sx: mpsc::Sender<(PathBuf, Device)>,
+    sx: mpsc::Sender<PathBuf>,
     kill: oneshot::Receiver<u8>,
 ) -> () {
     tokio::spawn(async move {
@@ -17,10 +16,10 @@ pub fn start_device_scanner(
     });
 }
 
-async fn scan(sx: mpsc::Sender<(PathBuf, Device)>) -> () {
+async fn scan(sx: mpsc::Sender<PathBuf>) -> () {
     loop {
-        for (path, device) in evdev::enumerate() {
-            match sx.send((path, device)).await {
+        for (path, _) in evdev::enumerate() {
+            match sx.send(path).await {
                 Ok(_) => {}
                 Err(e) => {
                     error!("error sending device, shutting down device listener: {e}");
