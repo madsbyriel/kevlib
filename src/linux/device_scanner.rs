@@ -6,7 +6,7 @@ use tracing::{error};
 
 pub fn start_device_scanner(
     sx: mpsc::Sender<PathBuf>,
-    kill: oneshot::Receiver<u8>,
+    kill: oneshot::Receiver<()>,
 ) -> () {
     tokio::spawn(async move {
         futures::select! {

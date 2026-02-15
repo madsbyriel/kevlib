@@ -15,16 +15,13 @@ pub fn get_runtime() -> Result<impl Runtime> {
 
 struct LinuxRuntime {
     input_sxs: Arc<Mutex<Vec<mpsc::Sender<InputEvent>>>>,
-    kill_sxs: Vec<oneshot::Sender<u8>>,
+    kill_sxs: Vec<oneshot::Sender<()>>,
 }
 
 impl Drop for LinuxRuntime {
     fn drop(&mut self) {
-        for c in self.kill_sxs.drain(..) {
-            match c.send(0) {
-                Ok(_) => {},
-                Err(_) => {},
-            };
+        for kill_sx in self.kill_sxs.drain(..) {
+            let _ = kill_sx.send(());
         }
     }
 }
@@ -47,8 +44,8 @@ impl LinuxRuntime {
     }
 
     async fn get_input_rx(&mut self) -> mpsc::Receiver<InputEvent> {
-        let mut sxs = self.input_sxs.lock().await;
         let (sx, rx) = mpsc::channel(100);
+        let mut sxs = self.input_sxs.lock().await;
         sxs.push(sx);
         rx
     }
@@ -57,16 +54,25 @@ impl LinuxRuntime {
 fn start_input_sender(mut rx: mpsc::Receiver<InputEvent>, sxs: Arc<Mutex<Vec<mpsc::Sender<InputEvent>>>>) -> () {
     tokio::spawn(async move {
         while let Some(event) = rx.recv().await {
-            let senders = sxs.lock().await;
+            let mut senders = sxs.lock().await;
 
-            for s in senders.iter() {
+            let mut to_remove = vec![];
+            for (idx, s) in senders.iter().enumerate() {
                 match s.send(event).await {
                     Ok(_) => {},
-                    Err(e) => {
-                        error!("error sending event, shutting down input sender: {e}");
-                        return;
+                    Err(_) => {
+                        error!("error sending event, will stop sending through error channel");
+                        to_remove.push(idx);
                     }
                 }
+            }
+
+            if to_remove.len() == 0 {
+                continue;
+            }
+
+            for idx in to_remove.iter().rev() {
+                senders.swap_remove(*idx);
             }
         }
     });
